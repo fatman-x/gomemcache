@@ -697,3 +697,79 @@ func (c *Client) incrDecr(verb, key string, delta uint64) (uint64, error) {
 	})
 	return val, err
 }
+
+
+type QueueStats struct {
+	Key []byte
+	In  int //队列中生产数
+	Out int //队列中消费数
+}
+
+func (c *Client) getAddr(key string, fn func(net.Addr) error) (err error) {
+	if !legalKey(key) {
+		return ErrMalformedKey
+	}
+	addr, err := c.selector.PickServer(key)
+	fmt.Println(addr)
+	if err != nil {
+		return err
+	}
+	return fn(addr)
+}
+
+func (c *Client) Stats(key string) (queueStats []*QueueStats, err error) {
+	err = c.getAddr(key, func(addr net.Addr) error {
+		return c.statsFromAddr(addr, key, func(qs *QueueStats) { queueStats = append(queueStats, qs) })
+	})
+	if err == nil && queueStats == nil {
+		err = ErrCacheMiss
+	}
+	return
+}
+
+func (c *Client) statsFromAddr(addr net.Addr, key string, cb func(*QueueStats)) error {
+	return c.withAddrRw(addr, func(rw *bufio.ReadWriter) error {
+		if _, err := fmt.Fprintf(rw, "stats queue \r\n"); err != nil {
+			return err
+		}
+		if err := rw.Flush(); err != nil {
+			return err
+		}
+		if err := parseStatsResponse(rw.Reader, key, cb); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func parseStatsResponse(r *bufio.Reader, key string, cb func(*QueueStats)) error {
+	for {
+		line, err := r.ReadSlice('\n')
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(line, resultEnd) {
+			return nil
+		}
+		qs := new(QueueStats)
+		err = scanStatsResponseLine(line, qs)
+		if err != nil {
+			return err
+		}
+		if key == string(qs.Key) {
+			cb(qs)
+			return nil
+		}
+	}
+}
+
+func scanStatsResponseLine(line []byte, qs *QueueStats) (err error) {
+	pattern := "STAT %s %d/%d\r\n"
+	dest := []interface{}{&qs.Key, &qs.In, &qs.Out}
+	n, err := fmt.Sscanf(string(line), pattern, dest...)
+
+	if err != nil || n != len(dest) {
+		return fmt.Errorf("memcache: unexpected line in get response: %q", line)
+	}
+	return nil
+}
