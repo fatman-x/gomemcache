@@ -717,9 +717,9 @@ func (c *Client) getAddr(key string, fn func(net.Addr) error) (err error) {
 	return fn(addr)
 }
 
-func (c *Client) Stats(key string) (queueStats []*QueueStats, err error) {
+func (c *Client) Stats(key string) (queueStats *QueueStats, err error) {
 	err = c.getAddr(key, func(addr net.Addr) error {
-		return c.statsFromAddr(addr, key, func(qs *QueueStats) { queueStats = append(queueStats, qs) })
+		return c.statsFromAddr(addr, key, func(qs *QueueStats) { queueStats = qs })
 	})
 	if err == nil && queueStats == nil {
 		err = ErrCacheMiss
