@@ -115,13 +115,46 @@ var (
 	resultClientErrorPrefix = []byte("CLIENT_ERROR ")
 )
 
+//mcq的连接池，全局变量
+var (
+	mcqMap   map[string]*Client
+	mapMutex *sync.RWMutex
+)
+
+//初始化
+func init() {
+	mcqMap = make(map[string]*Client)
+	mapMutex = new(sync.RWMutex)
+}
+
 // New returns a memcache client using the provided server(s)
 // with equal weight. If a server is listed multiple times,
 // it gets a proportional amount of weight.
 func New(server ...string) *Client {
+
 	ss := new(ServerList)
 	ss.SetServers(server...)
-	return NewFromSelector(ss)
+	//return NewFromSelector(ss)
+	var mcqClient *Client
+	var exist bool
+	//遍历所有的ip地址，如果存在则存在返回已有链接
+	for _, addr := range ss.addrs {
+		mapMutex.RLock()
+		mcqClient, exist = mcqMap[addr.String()]
+		mapMutex.RUnlock()
+		if !exist {
+			mapMutex.Lock()
+			mcqClient, exist = mcqMap[addr.String()]
+			if !exist {
+				mcqClient = &Client{selector: ss}
+				mcqMap[addr.String()] = mcqClient
+			}
+			mapMutex.Unlock()
+		}
+		return mcqClient
+	}
+	return mcqClient
+
 }
 
 // NewFromSelector returns a new Client using the provided ServerSelector.
@@ -696,80 +729,4 @@ func (c *Client) incrDecr(verb, key string, delta uint64) (uint64, error) {
 		return nil
 	})
 	return val, err
-}
-
-
-type QueueStats struct {
-	Key []byte
-	In  int //队列中生产数
-	Out int //队列中消费数
-}
-
-func (c *Client) getAddr(key string, fn func(net.Addr) error) (err error) {
-	if !legalKey(key) {
-		return ErrMalformedKey
-	}
-	addr, err := c.selector.PickServer(key)
-	fmt.Println(addr)
-	if err != nil {
-		return err
-	}
-	return fn(addr)
-}
-
-func (c *Client) Stats(key string) (queueStats *QueueStats, err error) {
-	err = c.getAddr(key, func(addr net.Addr) error {
-		return c.statsFromAddr(addr, key, func(qs *QueueStats) { queueStats = qs })
-	})
-	if err == nil && queueStats == nil {
-		err = ErrCacheMiss
-	}
-	return
-}
-
-func (c *Client) statsFromAddr(addr net.Addr, key string, cb func(*QueueStats)) error {
-	return c.withAddrRw(addr, func(rw *bufio.ReadWriter) error {
-		if _, err := fmt.Fprintf(rw, "stats queue \r\n"); err != nil {
-			return err
-		}
-		if err := rw.Flush(); err != nil {
-			return err
-		}
-		if err := parseStatsResponse(rw.Reader, key, cb); err != nil {
-			return err
-		}
-		return nil
-	})
-}
-
-func parseStatsResponse(r *bufio.Reader, key string, cb func(*QueueStats)) error {
-	for {
-		line, err := r.ReadSlice('\n')
-		if err != nil {
-			return err
-		}
-		if bytes.Equal(line, resultEnd) {
-			return nil
-		}
-		qs := new(QueueStats)
-		err = scanStatsResponseLine(line, qs)
-		if err != nil {
-			return err
-		}
-		if key == string(qs.Key) {
-			cb(qs)
-			return nil
-		}
-	}
-}
-
-func scanStatsResponseLine(line []byte, qs *QueueStats) (err error) {
-	pattern := "STAT %s %d/%d\r\n"
-	dest := []interface{}{&qs.Key, &qs.In, &qs.Out}
-	n, err := fmt.Sscanf(string(line), pattern, dest...)
-
-	if err != nil || n != len(dest) {
-		return fmt.Errorf("memcache: unexpected line in get response: %q", line)
-	}
-	return nil
 }
